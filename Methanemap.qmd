@@ -1,0 +1,135 @@
+---
+title: "Climatology Final"
+author: "Rae Hopp"
+format: html
+editor: visual
+---
+
+## Methane Map 
+
+unit for methane: milligrams of carbon per square meter per day $mg C m^2/day$
+
+```{r}
+library(readr)
+library(dplyr)
+library(shiny)
+library(bslib)
+library(leaflet)
+library(dplyr)
+```
+
+```{r}
+setwd("/Users/rachelhopp/Desktop/R Folder Stats/Final")
+sites <- read_csv("GRiMe_sites_v2.csv")
+flux  <- read_csv("CH4Flux.csv")
+
+ch4_site_mean <- flux %>%
+  group_by(Site_ID) %>%
+  summarise(
+    Site_Name = first(Site_Name),
+    Source_ID = paste(unique(Source_ID), collapse = ";"),
+    n_flux = sum(!is.na(Diffusive_CH4_Flux_Mean)),
+    Diffusive_CH4_Flux_Mean = if (n_flux > 0) mean(Diffusive_CH4_Flux_Mean, na.rm = TRUE) else NA_real_,
+    .groups = "drop"
+  ) %>%
+  left_join(sites %>% select(Site_ID, Latitude, Longitude), by = "Site_ID") %>%
+  filter(between(Diffusive_CH4_Flux_Mean, 0, 100)) %>%  # drops NA and zero/negative site means
+  select(Latitude, Longitude, Site_ID, Site_Name, Source_ID,
+         Diffusive_CH4_Flux_Mean, n_flux)
+
+write_csv(ch4_site_mean, "CH4Flux_site_means.csv")
+flux <- read.csv("CH4Flux_site_means.csv")
+max(flux$Diffusive_CH4_Flux_Mean, na.rm = TRUE)
+median(flux$Diffusive_CH4_Flux_Mean, na.rm = TRUE)
+min(flux$Diffusive_CH4_Flux_Mean, na.rm = TRUE)
+
+```
+
+```{r}
+
+
+# ---- Runs ONCE, when the app starts ----------------------------------------
+flux = read.csv(
+  "/Users/rachelhopp/Desktop/R Folder Stats/Final/CH4Flux_site_means.csv"
+) |>
+  select(Site_ID, Site_Name, Latitude, Longitude, Diffusive_CH4_Flux_Mean, n_flux)
+
+# Literature sites with 13C-depleted benthic/hyporheic insects
+depleted = read.csv(
+  "/Users/rachelhopp/Desktop/R Folder Stats/Final/Depletedsites.csv",
+  check.names = FALSE, fileEncoding = "UTF-8-BOM"
+)
+names(depleted) = trimws(names(depleted))   # "Latitude " / "Longitude " have trailing spaces
+depleted = depleted |>
+  transmute(Site = `Site Location`, Latitude, Longitude)
+
+# Fixed color scale so the legend doesn't change when the filter moves
+pal = colorNumeric("YlOrRd", domain = flux$Diffusive_CH4_Flux_Mean)
+
+ui = page_sidebar(
+  title = "Diffusive Methane Flux, Freshwater",
+  sidebar = sidebar(
+    sliderInput(
+      "min_flux", "Minimum flux (mmol m-2 d-1)",
+      min = 0, max = ceiling(max(flux$Diffusive_CH4_Flux_Mean)),
+      value = 0, step = 1
+    ),
+    textOutput("n")
+  ),
+  leafletOutput("map")
+)
+
+server = function(input, output, session) {
+  
+  # Re-runs whenever the slider changes
+  flux_sub = reactive({
+    flux |> filter(Diffusive_CH4_Flux_Mean >= input$min_flux)
+  })
+  
+  output$n = renderText({
+    paste(nrow(flux_sub()), "sites shown")
+  })
+  
+  add_sites = function(map, data) {
+    map |>
+      clearGroup("flux") |>                     # only clears the flux dots, not the star symbols
+      addCircleMarkers(
+        data = data, lng = ~Longitude, lat = ~Latitude, group = "flux",
+        radius = ~pmax(3, sqrt(Diffusive_CH4_Flux_Mean) * 1.5),
+        weight = 1, color = "black",
+        fillColor = ~pal(Diffusive_CH4_Flux_Mean), fillOpacity = 0.7,
+        popup = ~paste0("<b>", Site_Name, "</b> (Site ", Site_ID, ")<br>",
+                        "Mean flux: ", round(Diffusive_CH4_Flux_Mean, 2),
+                        " mmol m-2 d-1<br>n = ", n_flux)
+      )
+  }
+  
+  # Base map, legend, depleted-site symbols, first set of dots (runs once)
+  output$map = renderLeaflet({
+    leaflet() |>
+      addProviderTiles(providers$Esri.WorldGrayCanvas) |>
+      setView(lng = 0, lat = 20, zoom = 2) |>
+      addLegend(
+        position = "bottomleft", pal = pal,
+        values = flux$Diffusive_CH4_Flux_Mean,
+        title = "Flux (mmol m-2 d-1)", opacity = 0.8
+      ) |>
+      addAwesomeMarkers(
+        data = depleted, lng = ~Longitude, lat = ~Latitude,
+        icon = awesomeIcons(icon = "star", library = "fa",
+                            markerColor = "blue", iconColor = "white"),
+        label = ~Site,     # shows on hover
+        popup = ~Site      # shows on click
+      ) |>
+      add_sites(isolate(flux_sub()))
+  })
+  
+  # Swap the flux dots only when the slider moves
+  observe({
+    leafletProxy("map") |>
+      add_sites(flux_sub())
+  })
+}
+
+shinyApp(ui, server)
+```
